@@ -33,22 +33,20 @@ class FileUtils {
     try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
       offsets[0] = 0;
       for (int i = 1; i < numParts; i++) {
-        long approx = partSize * i;
-        raf.seek(approx);
+    	  long approx = partSize * i;
+    	  long pos = approx;
 
-        // Skip forward to the next word boundary (non-letter)
-        while (raf.getFilePointer() < size) {
-          int c = raf.read();
-          if (c == -1)
-            break;
-          if (!Character.isLetter(c)) {
-            offsets[i] = raf.getFilePointer();
-            break;
-          }
-        }
-        if (offsets[i] == 0) {
-          offsets[i] = approx; // fallback if no boundary found
-        }
+    	  raf.seek(pos);
+    	  while (raf.getFilePointer() < size) {
+    	    int c = raf.read();
+    	    if (c == -1) break;
+    	    if (Character.isWhitespace((char) c)) {
+    	      pos = raf.getFilePointer(); 
+    	      break;
+    	    }
+    	  }
+    	  offsets[i] = (pos != approx) ? pos : approx;
+
       }
       offsets[numParts] = size;
     }

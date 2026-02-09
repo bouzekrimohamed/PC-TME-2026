@@ -11,24 +11,50 @@ import java.util.Scanner;
 
 public class WordFrequency {
 
-  private static class CounterWorker {
-    //TODO : au choix
-    //TODO : extends Thread {
-    //TODO : implements Runnable {
+  private static class CounterWorker extends Thread {
+	  private final File file;
+	  private final long start;
+	  private final long end;
 
-    /* TODO : ajouter les attributs */
-    /* TODO : Constructeur */
-    
-    /* TODO : run() */
-    
-    /* TODO : getters pour les résultats */
+	  private long totalWords = 0;
+	  private final Map<String, Integer> map = new HashMap<>();
+
+	  public CounterWorker(File file, long start, long end) {
+	    this.file = file;
+	    this.start = start;
+	    this.end = end;
+	  }
+
+	  @Override
+	  public void run() {
+	    try (InputStream is = FileUtils.getRange(file, start, end);
+	         Scanner scanner = new Scanner(is)) {
+	      while (scanner.hasNext()) {
+	        String word = cleanWord(scanner.next());
+	        if (!word.isEmpty()) {
+	          totalWords++;
+	          map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+	        }
+	      }
+	    } catch (IOException e) {
+	      throw new RuntimeException(e);
+	    }
+	  }
+
+	  public long getTotalWords() { return totalWords; }
+	  public Map<String, Integer> getMap() { return map; }
   }
 
   /* TODO : merge two maps
    */
   public static Map<String, Integer> mergeInto(Map<String, Integer> a, Map<String, Integer> b) {
-    // TODO
-    return null;
+	  for (Map.Entry<String, Integer> e : b.entrySet()) {
+		    String w = e.getKey();
+		    int v = e.getValue();
+		    a.put(w, a.getOrDefault(w, 0) + v);
+		  }
+		  return a;
+
   }
 
   public static void main(String[] args) throws IOException {
@@ -63,7 +89,24 @@ public class WordFrequency {
       }
       printResults(totalWords, map);
     } else if (mode.equals("hash2")) {
-      // TODO : base hash, mais on get/put au lieu de compute
+    	  long totalWords = 0;
+    	  Map<String, Integer> map = new HashMap<>();
+    	  try (Scanner scanner = new Scanner(file)) {
+    	    while (scanner.hasNext()) {
+    	      String word = cleanWord(scanner.next());
+    	      if (!word.isEmpty()) {
+    	        totalWords++;
+
+    	        Integer c = map.get(word);
+    	        if (c == null) {
+    	          map.put(word, 1);
+    	        } else {
+    	          map.put(word, c + 1);
+    	        }
+    	      }
+    	    }
+    	  }
+    	  printResults(totalWords, map);
     } else if (mode.equals("range")) {
       // Sequential full-file processing with hash map + use of getRange
       long totalWords = 0;
@@ -80,27 +123,62 @@ public class WordFrequency {
       printResults(totalWords, map);
 
     } else if (mode.equals("partition")) {
-      // Single-threaded, loop over ranges with single map
-      long[] parts = FileUtils.partition(file, numThreads);
-      long totalWords = 0;
-      Map<String, Integer> map = new HashMap<>();
+        // Calcul des indices de découpage pour N morceaux 
+        long[] parts = FileUtils.partition(file, numThreads);
+        long totalWords = 0;
+        Map<String, Integer> map = new HashMap<>();
 
-      for (int i = 0; i < numThreads; i++) {
-        // TODO work on : (parts[i], parts[i + 1]
-      }
-      printResults(totalWords, map);
+        // On boucle sur chaque segment de la partition 
+        for (int i = 0; i < numThreads; i++) {
+        	long start = parts[i];
+        	long end = parts[i + 1];
+
+        	try (InputStream is = FileUtils.getRange(file, start, end);
+        	     Scanner scanner = new Scanner(is)) {
+
+        	 
+
+        	  while (scanner.hasNext()) {
+        	    String word = cleanWord(scanner.next());
+        	    if (!word.isEmpty()) {
+        	      totalWords++;
+        	      map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+        	    }
+        	  }
+        	}
+
+          }
+        
+        printResults(totalWords, map);
 
     } else if (mode.equals("shard")) {
       // Multi-threaded, per-thread local maps, merge after
       // Based on partition + using CounterWorker
-      
+    	long[] parts = FileUtils.partition(file, numThreads);
       // create one thread per partition element
-      
+    	  List<CounterWorker> workers = new ArrayList<>();
+    	  for (int i = 0; i < numThreads; i++) {
+    	    CounterWorker w = new CounterWorker(file, parts[i], parts[i + 1]);
+    	    workers.add(w);
+    	    w.start();
+    	  }
       // join all threads
-      
+    	  for (CounterWorker w : workers) {
+    		    try {
+    		      w.join();
+    		    } catch (InterruptedException e) {
+    		      throw new RuntimeException(e);
+    		    }
+    		  }
       // collect and merge results
-      
+    	  long totalWords = 0;
+    	  Map<String, Integer> map = new HashMap<>();
+    	  for (CounterWorker w : workers) {
+    	    totalWords += w.getTotalWords();
+    	    mergeInto(map, w.getMap());
+    	  }
       // printResults
+    	  printResults(totalWords, map);
     } else {
       System.err.println("Unknown mode: " + mode);
       System.exit(1);
