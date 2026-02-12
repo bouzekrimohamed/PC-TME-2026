@@ -4,10 +4,14 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.ConcurrentModificationException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class WordFrequency {
 
@@ -29,9 +33,9 @@ public class WordFrequency {
     long startTime = System.nanoTime();
 
     if (mode.equals("hash")) {
-      // Sequential full-file processing with hash map
       long totalWords = 0;
       Map<String, Integer> map = new HashMap<>();
+
       try (Scanner scanner = new Scanner(file)) {
         while (scanner.hasNext()) {
           String word = cleanWord(scanner.next());
@@ -42,8 +46,8 @@ public class WordFrequency {
         }
       }
       printResults(totalWords, map);
+
     } else if (mode.equals("partition")) {
-      // Single-threaded, loop over ranges with single map
       long[] parts = FileUtils.partition(file, numThreads);
       long totalWords = 0;
       Map<String, Integer> map = new HashMap<>();
@@ -60,6 +64,234 @@ public class WordFrequency {
         }
       }
       printResults(totalWords, map);
+
+    } else if (mode.equals("naive")) {
+      long[] parts = FileUtils.partition(file, numThreads);
+      long[] totalWords = new long[1];
+      Map<String, Integer> map = new HashMap<>();
+
+      Thread[] threads = new Thread[numThreads];
+      for (int i = 0; i < numThreads; i++) {
+        final long start = parts[i];
+        final long end = parts[i + 1];
+        threads[i] = new Thread(new NaiveWorker(file, start, end, map, totalWords));
+        threads[i].start();
+      }
+
+      for (int i = 0; i < numThreads; i++) {
+        try {
+          threads[i].join();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+
+      printResults(totalWords[0], map);
+
+    } else if (mode.equals("naive2")) {
+      // BONUS Q4: lambda (ou classe anonyme) au lieu d'une classe dédiée
+      long[] parts = FileUtils.partition(file, numThreads);
+      final long[] totalWords = new long[1]; // partagé (FAUX -> data race, normal pour ce mode)
+      final Map<String, Integer> map = new HashMap<>(); // partagé (FAUX -> data race, normal pour ce mode)
+      final AtomicLong cmeCount = new AtomicLong(0); // optionnel: compter les ConcurrentModificationException
+
+      Thread[] threads = new Thread[numThreads];
+      for (int i = 0; i < numThreads; i++) {
+        final long start = parts[i];
+        final long end = parts[i + 1];
+
+        threads[i] = new Thread(() -> {
+          try (Scanner scanner = new Scanner(FileUtils.getRange(file, start, end))) {
+            while (scanner.hasNext()) {
+              String word = cleanWord(scanner.next());
+              if (!word.isEmpty()) {
+                totalWords[0]++; // FAUX (data race)
+                try {
+                  map.compute(word, (w, c) -> c == null ? 1 : c + 1); // FAUX (data race)
+                } catch (ConcurrentModificationException ex) {
+                  cmeCount.incrementAndGet(); // on continue l'exécution
+                }
+              }
+            }
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        });
+
+        threads[i].start();
+      }
+
+      for (int i = 0; i < numThreads; i++) {
+        try {
+          threads[i].join();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+
+      if (cmeCount.get() > 0) {
+        System.out.println("ConcurrentModificationException count: " + cmeCount.get());
+      }
+      printResults(totalWords[0], map);
+
+    } else if (mode.equals("atomic")) {
+      long[] parts = FileUtils.partition(file, numThreads);
+      AtomicLong totalWords = new AtomicLong(0);
+      Map<String, Integer> map = new HashMap<>();
+
+      Thread[] threads = new Thread[numThreads];
+      for (int i = 0; i < numThreads; i++) {
+        final long start = parts[i];
+        final long end = parts[i + 1];
+
+        threads[i] = new Thread(() -> {
+          try (Scanner scanner = new Scanner(FileUtils.getRange(file, start, end))) {
+            while (scanner.hasNext()) {
+              String word = cleanWord(scanner.next());
+              if (!word.isEmpty()) {
+                totalWords.incrementAndGet();
+                map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+              }
+            }
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        });
+
+        threads[i].start();
+      }
+
+      for (int i = 0; i < numThreads; i++) {
+        try {
+          threads[i].join();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+
+      printResults(totalWords.get(), map);
+
+    } else if (mode.equals("synchronized")) {
+      long[] parts = FileUtils.partition(file, numThreads);
+      AtomicLong totalWords = new AtomicLong(0);
+      Map<String, Integer> map = new HashMap<>();
+
+      Thread[] threads = new Thread[numThreads];
+      for (int i = 0; i < numThreads; i++) {
+        final long start = parts[i];
+        final long end = parts[i + 1];
+
+        threads[i] = new Thread(() -> {
+          try (Scanner scanner = new Scanner(FileUtils.getRange(file, start, end))) {
+            while (scanner.hasNext()) {
+              String word = cleanWord(scanner.next());
+              if (!word.isEmpty()) {
+                totalWords.incrementAndGet();
+                synchronized (map) {
+                  map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+                }
+              }
+            }
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        });
+
+        threads[i].start();
+      }
+
+      for (int i = 0; i < numThreads; i++) {
+        try {
+          threads[i].join();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+
+      printResults(totalWords.get(), map);
+
+    } else if (mode.equals("lock")) {
+      // BONUS Q8: ReentrantLock au lieu de synchronized
+      long[] parts = FileUtils.partition(file, numThreads);
+      AtomicLong totalWords = new AtomicLong(0);
+      Map<String, Integer> map = new HashMap<>();
+      final Lock lock = new ReentrantLock();
+
+      Thread[] threads = new Thread[numThreads];
+      for (int i = 0; i < numThreads; i++) {
+        final long start = parts[i];
+        final long end = parts[i + 1];
+
+        threads[i] = new Thread(() -> {
+          try (Scanner scanner = new Scanner(FileUtils.getRange(file, start, end))) {
+            while (scanner.hasNext()) {
+              String word = cleanWord(scanner.next());
+              if (!word.isEmpty()) {
+                totalWords.incrementAndGet();
+
+                lock.lock();
+                try {
+                  map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+                } finally {
+                  lock.unlock();
+                }
+              }
+            }
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        });
+
+        threads[i].start();
+      }
+
+      for (int i = 0; i < numThreads; i++) {
+        try {
+          threads[i].join();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+
+      printResults(totalWords.get(), map);
+
+    } else if (mode.equals("decorated")) {
+      long[] parts = FileUtils.partition(file, numThreads);
+      AtomicLong totalWords = new AtomicLong(0);
+      Map<String, Integer> map = Collections.synchronizedMap(new HashMap<>());
+
+      Thread[] threads = new Thread[numThreads];
+      for (int i = 0; i < numThreads; i++) {
+        final long start = parts[i];
+        final long end = parts[i + 1];
+
+        threads[i] = new Thread(() -> {
+          try (Scanner scanner = new Scanner(FileUtils.getRange(file, start, end))) {
+            while (scanner.hasNext()) {
+              String word = cleanWord(scanner.next());
+              if (!word.isEmpty()) {
+                totalWords.incrementAndGet();
+                map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+              }
+            }
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        });
+
+        threads[i].start();
+      }
+
+      for (int i = 0; i < numThreads; i++) {
+        try {
+          threads[i].join();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+
+      printResults(totalWords.get(), map);
+
     } else {
       System.err.println("Unknown mode: " + mode);
       System.exit(1);
@@ -77,9 +309,9 @@ public class WordFrequency {
     List<Map.Entry<String, Integer>> wordList = new ArrayList<>(map.entrySet());
     wordList.sort((e1, e2) -> {
       if (!e1.getValue().equals(e2.getValue())) {
-        return Integer.compare(e2.getValue(), e1.getValue()); // desc freq
+        return Integer.compare(e2.getValue(), e1.getValue());
       } else {
-        return e1.getKey().compareTo(e2.getKey()); // asc alpha
+        return e1.getKey().compareTo(e2.getKey());
       }
     });
 
@@ -88,7 +320,38 @@ public class WordFrequency {
     }
   }
 
-  private static String cleanWord(String word) {
+  static String cleanWord(String word) {
     return word.replaceAll("[^a-zA-Z]", "").toLowerCase();
+  }
+}
+
+class NaiveWorker implements Runnable {
+  private final File file;
+  private final long start;
+  private final long end;
+  private final Map<String, Integer> map;
+  private final long[] totalWords;
+
+  public NaiveWorker(File file, long start, long end, Map<String, Integer> map, long[] totalWords) {
+    this.file = file;
+    this.start = start;
+    this.end = end;
+    this.map = map;
+    this.totalWords = totalWords;
+  }
+
+  @Override
+  public void run() {
+    try (Scanner scanner = new Scanner(FileUtils.getRange(file, start, end))) {
+      while (scanner.hasNext()) {
+        String word = WordFrequency.cleanWord(scanner.next());
+        if (!word.isEmpty()) {
+          totalWords[0]++;
+          map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+        }
+      }
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
   }
 }
