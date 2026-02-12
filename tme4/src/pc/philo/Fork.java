@@ -1,13 +1,15 @@
 package pc.philo;
-
+import java.util.concurrent.locks.ReentrantLock;
 public class Fork {
-	
-	public void acquire () {
-		// TODO
+    private final ReentrantLock lock = new ReentrantLock();
+	public void acquire () throws InterruptedException {
+        lock.lockInterruptibly();
     }
 	
 	
 	public void release () {
-		// TODO
+		if (lock.isHeldByCurrentThread()) {
+            lock.unlock();
+        }
 	}
 }

@@ -67,4 +67,4 @@ On s’intéresse au nombre de cœurs car le gain du parallélisme est limité p
 Q11 (bonus):
 Complexité de mergeInto(destination, source) : on parcourt toutes les entrées de source (taille |S|) et pour chacune on fait un get/put en O(1) amorti dans une HashMap, donc O(|S|) amorti.
 
-Si on inverse source/destination, le coût dépend surtout de la taille de la source, donc on veut que la source soit la plus petite
+Si on inverse source/destination, le coût dépend surtout de la taille de la source, donc on veut que la source soit la plus petite 
