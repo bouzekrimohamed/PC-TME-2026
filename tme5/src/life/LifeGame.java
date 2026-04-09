@@ -1,6 +1,7 @@
 package life;
 
 import java.util.Arrays;
+import java.util.stream.Collectors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import life.mode.*;
@@ -21,13 +22,13 @@ public class LifeGame {
 				// Modes avec 1 updater pour 1 refresher
 				new NaiveMode(), // fourni, utilise sleep et aucune protection
 				new LambdaMode(), // fourni, naive mais en lambda
-// TODO				new MtSafeMode(), // a partir de Naive, protéger LifeModel des data race.
-// TODO				new AlternateMode(), // a partir de MtSafe, forcer une alternance avec wait/notify
-// TODO				new ExternalMode(), // a partir de Naive, forcer une alternance avec une classe de synchro
+				new MtSafeMode(), // a partir de Naive, protéger LifeModel des data race.
+				new AlternateMode(), // a partir de MtSafe, forcer une alternance avec wait/notify
+				new ExternalMode(), // a partir de Naive, forcer une alternance avec une classe de synchro
 				// Modes avec plusieurs updater pour 1 refresher
 				new MultiMode(), // base avec N updater, sans protection
-//TODO				new TwoSemaphoreMode(), // avec 2 sémaphores (un pour les updaters, un pour le refresher)
-//TODO				new SemaphoreMode(), // avec N+1 sémaphores (un par updater, un pour le refresher)
+				new TwoSemaphoreMode(), // avec 2 sémaphores (un pour les updaters, un pour le refresher)
+				new SemaphoreMode(), // avec N+1 sémaphores (un par updater, un pour le refresher)
 		};
 
 		String mode = "naive";
@@ -54,7 +55,8 @@ public class LifeGame {
 		if (selectedMode == null) {
 			System.err.println("Unknown mode: " + mode);
 			System.err.println(
-					"Available modes: " + String.join(", ", Arrays.stream(modes).map(LifeMode::getName).toList()));
+					"Available modes: "
+							+ String.join(", ", Arrays.stream(modes).map(LifeMode::getName).collect(Collectors.toList())));
 			return;
 		}
 		System.out.println("Starting Game of Life with mode=" + mode + " and workers=" + workers);

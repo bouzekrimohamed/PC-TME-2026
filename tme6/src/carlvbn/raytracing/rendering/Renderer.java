@@ -11,6 +11,12 @@ import java.awt.Graphics;
 import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferInt;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class Renderer {
     private static final float GLOBAL_ILLUMINATION = 0.3F;
@@ -20,6 +26,27 @@ public class Renderer {
 
     public static float bloomIntensity = 0.5F;
     public static int bloomRadius = 10;
+    private static final int POOL_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors());
+    private static final int POOL_QUEUE_CAPACITY = 100;
+    private static final ThreadPool POOL = new ThreadPool(POOL_THREADS, POOL_QUEUE_CAPACITY);
+    private static final ExecutorService EXEC_SINGLE = Executors.newSingleThreadExecutor();
+    private static final ExecutorService EXEC_FIXED = Executors.newFixedThreadPool(POOL_THREADS);
+    private static final ExecutorService EXEC_PER_TASK = new ThreadPerTaskExecutor();
+
+    private enum RenderMode {
+        SEQUENTIAL,
+        THREAD_PER_PIXEL_SYNC,
+        THREAD_PER_COL_SYNC,
+        POOL_COL_SYNC,
+        POOL_COL_IMAGE,
+        POOL_PIXEL_IMAGE,
+        EXECUTOR_SINGLE_COL_IMAGE,
+        EXECUTOR_FIXED_COL_IMAGE,
+        EXECUTOR_PER_TASK_COL_IMAGE
+    }
+
+    // Change this value to compare implementations for TME6/TME7.
+    private static final RenderMode RENDER_MODE = RenderMode.EXECUTOR_FIXED_COL_IMAGE;
 
     /** Renders the scene to a java.awt.Graphics object
      * @param scene The scene to Render
@@ -28,21 +55,181 @@ public class Renderer {
      * @param resolution (Floating point greater than 0 and lower or equal to 1) Controls the number of rays traced. (1 = Every pixel is ray-traced)
      */
     public static void renderScene(Scene scene, Graphics gfx, int width, int height, float resolution) {
-        int blockSize = (int) (1 / resolution);
+        switch (RENDER_MODE) {
+            case THREAD_PER_PIXEL_SYNC:
+                renderSceneThreadPerPixel(scene, gfx, width, height, resolution);
+                break;
+            case THREAD_PER_COL_SYNC:
+                renderSceneThreadPerCol(scene, gfx, width, height, resolution);
+                break;
+            case POOL_COL_SYNC:
+                renderScenePoolCol(scene, gfx, width, height, resolution);
+                break;
+            case POOL_COL_IMAGE:
+                renderScenePoolColV2(scene, gfx, width, height, resolution);
+                break;
+            case POOL_PIXEL_IMAGE:
+                renderScenePoolPixelV2(scene, gfx, width, height, resolution);
+                break;
+            case EXECUTOR_SINGLE_COL_IMAGE:
+                renderSceneExecutorCol(scene, gfx, width, height, resolution, EXEC_SINGLE, "executor-single-col");
+                break;
+            case EXECUTOR_FIXED_COL_IMAGE:
+                renderSceneExecutorCol(scene, gfx, width, height, resolution, EXEC_FIXED, "executor-fixed-col");
+                break;
+            case EXECUTOR_PER_TASK_COL_IMAGE:
+                renderSceneExecutorCol(scene, gfx, width, height, resolution, EXEC_PER_TASK, "executor-per-task-col");
+                break;
+            case SEQUENTIAL:
+            default:
+                renderSceneSequential(scene, gfx, width, height, resolution);
+                break;
+        }
+    }
+
+    public static void renderSceneSequential(Scene scene, Graphics gfx, int width, int height, float resolution) {
+        int blockSize = blockSizeForResolution(resolution);
         long start = System.currentTimeMillis();
-
-        
-        for (int x = 0; x<width; x+=blockSize) {
-            for (int y = 0; y<height; y+=blockSize) {
-                float[] uv = getNormalizedScreenCoordinates(x, y, width, height);
-                PixelData pixelData = computePixelInfo(scene, uv[0], uv[1]);
-
-                gfx.setColor(pixelData.getColor().toAWTColor());
-                gfx.fillRect(x, y, blockSize, blockSize);
+        for (int x = 0; x < width; x += blockSize) {
+            for (int y = 0; y < height; y += blockSize) {
+                drawPixelToGraphics(scene, gfx, width, height, x, y, blockSize);
             }
         }
+        logRenderTime("sequential", start);
+    }
 
-        System.out.println("Rendered in " + (System.currentTimeMillis() - start) + "ms");
+    public static void renderSceneThreadPerPixel(Scene scene, Graphics gfx, int width, int height, float resolution) {
+        int blockSize = blockSizeForResolution(resolution);
+        long start = System.currentTimeMillis();
+        List<Thread> threads = new ArrayList<>();
+        for (int x = 0; x < width; x += blockSize) {
+            for (int y = 0; y < height; y += blockSize) {
+                final int fx = x;
+                final int fy = y;
+                Thread thread = new Thread(() -> drawPixelToGraphicsSync(scene, gfx, width, height, fx, fy, blockSize));
+                threads.add(thread);
+                thread.start();
+            }
+        }
+        joinAll(threads);
+        logRenderTime("thread-per-pixel-sync", start);
+    }
+
+    public static void renderSceneThreadPerCol(Scene scene, Graphics gfx, int width, int height, float resolution) {
+        int blockSize = blockSizeForResolution(resolution);
+        long start = System.currentTimeMillis();
+        List<Thread> threads = new ArrayList<>();
+        for (int x = 0; x < width; x += blockSize) {
+            final int fx = x;
+            Thread thread = new Thread(() -> {
+                for (int y = 0; y < height; y += blockSize) {
+                    drawPixelToGraphicsSync(scene, gfx, width, height, fx, y, blockSize);
+                }
+            });
+            threads.add(thread);
+            thread.start();
+        }
+        joinAll(threads);
+        logRenderTime("thread-per-col-sync", start);
+    }
+
+    public static void renderScenePoolCol(Scene scene, Graphics gfx, int width, int height, float resolution) {
+        int blockSize = blockSizeForResolution(resolution);
+        long start = System.currentTimeMillis();
+        int tasks = columnTaskCount(width, blockSize);
+        CountDownLatch latch = new CountDownLatch(tasks);
+        for (int x = 0; x < width; x += blockSize) {
+            final int fx = x;
+            POOL.execute(() -> {
+                try {
+                    for (int y = 0; y < height; y += blockSize) {
+                        drawPixelToGraphicsSync(scene, gfx, width, height, fx, y, blockSize);
+                    }
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        awaitLatch(latch);
+        logRenderTime("pool-col-sync", start);
+    }
+
+    public static void renderScenePoolColV2(Scene scene, Graphics gfx, int width, int height, float resolution) {
+        int blockSize = blockSizeForResolution(resolution);
+        long start = System.currentTimeMillis();
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        int tasks = columnTaskCount(width, blockSize);
+        CountDownLatch latch = new CountDownLatch(tasks);
+        for (int x = 0; x < width; x += blockSize) {
+            final int fx = x;
+            POOL.execute(() -> {
+                try {
+                    for (int y = 0; y < height; y += blockSize) {
+                        drawPixelToImage(scene, image, width, height, fx, y, blockSize);
+                    }
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        awaitLatch(latch);
+        gfx.drawImage(image, 0, 0, null);
+        logRenderTime("pool-col-image", start);
+    }
+
+    public static void renderScenePoolPixelV2(Scene scene, Graphics gfx, int width, int height, float resolution) {
+        int blockSize = blockSizeForResolution(resolution);
+        long start = System.currentTimeMillis();
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        int tasks = pixelTaskCount(width, height, blockSize);
+        CountDownLatch latch = new CountDownLatch(tasks);
+        for (int x = 0; x < width; x += blockSize) {
+            for (int y = 0; y < height; y += blockSize) {
+                final int fx = x;
+                final int fy = y;
+                POOL.execute(() -> {
+                    try {
+                        drawPixelToImage(scene, image, width, height, fx, fy, blockSize);
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+            }
+        }
+        awaitLatch(latch);
+        gfx.drawImage(image, 0, 0, null);
+        logRenderTime("pool-pixel-image", start);
+    }
+
+    public static void renderSceneExecutorCol(
+            Scene scene,
+            Graphics gfx,
+            int width,
+            int height,
+            float resolution,
+            ExecutorService exec,
+            String modeName
+    ) {
+        int blockSize = blockSizeForResolution(resolution);
+        long start = System.currentTimeMillis();
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        int tasks = columnTaskCount(width, blockSize);
+        CountDownLatch latch = new CountDownLatch(tasks);
+        for (int x = 0; x < width; x += blockSize) {
+            final int fx = x;
+            exec.execute(() -> {
+                try {
+                    for (int y = 0; y < height; y += blockSize) {
+                        drawPixelToImage(scene, image, width, height, fx, y, blockSize);
+                    }
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        awaitLatch(latch);
+        gfx.drawImage(image, 0, 0, null);
+        logRenderTime(modeName, start);
     }
 
     /** Same as the above but applies Post-Processing effects before drawing. */
@@ -209,5 +396,87 @@ public class Renderer {
             int length = endX - startX;
             Arrays.fill(pixels, offset, offset + length, rgb);
         }
+    }
+
+    private static int blockSizeForResolution(float resolution) {
+        int blockSize = (int) (1 / resolution);
+        return Math.max(1, blockSize);
+    }
+
+    private static void drawPixelToGraphics(Scene scene, Graphics gfx, int width, int height, int x, int y, int blockSize) {
+        float[] uv = getNormalizedScreenCoordinates(x, y, width, height);
+        PixelData pixelData = computePixelInfo(scene, uv[0], uv[1]);
+        gfx.setColor(pixelData.getColor().toAWTColor());
+        gfx.fillRect(x, y, blockSize, blockSize);
+    }
+
+    private static void drawPixelToGraphicsSync(Scene scene, Graphics gfx, int width, int height, int x, int y, int blockSize) {
+        float[] uv = getNormalizedScreenCoordinates(x, y, width, height);
+        PixelData pixelData = computePixelInfo(scene, uv[0], uv[1]);
+        synchronized (gfx) {
+            gfx.setColor(pixelData.getColor().toAWTColor());
+            gfx.fillRect(x, y, blockSize, blockSize);
+        }
+    }
+
+    private static void drawPixelToImage(Scene scene, BufferedImage image, int width, int height, int x, int y, int blockSize) {
+        float[] uv = getNormalizedScreenCoordinates(x, y, width, height);
+        PixelData pixelData = computePixelInfo(scene, uv[0], uv[1]);
+        fillColorRect(image, x, y, blockSize, blockSize, pixelData.getColor());
+    }
+
+    private static int columnTaskCount(int width, int blockSize) {
+        return (width + blockSize - 1) / blockSize;
+    }
+
+    private static int pixelTaskCount(int width, int height, int blockSize) {
+        return columnTaskCount(width, blockSize) * columnTaskCount(height, blockSize);
+    }
+
+    private static void joinAll(List<Thread> threads) {
+        for (Thread t : threads) {
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Rendering interrupted while joining threads", e);
+            }
+        }
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Rendering interrupted while waiting for tasks", e);
+        }
+    }
+
+    private static void logRenderTime(String mode, long start) {
+        long duration = System.currentTimeMillis() - start;
+        System.out.println("Rendered [" + mode + "] in " + duration + "ms");
+    }
+
+    private static class ThreadPerTaskExecutor implements ExecutorService {
+        @Override
+        public void execute(Runnable command) {
+            Thread t = new Thread(command, "renderer-exec-per-task");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        @Override public void shutdown() {}
+        @Override public List<Runnable> shutdownNow() { return new ArrayList<>(); }
+        @Override public boolean isShutdown() { return false; }
+        @Override public boolean isTerminated() { return false; }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return true; }
+        @Override public <T> java.util.concurrent.Future<T> submit(java.util.concurrent.Callable<T> task) { throw new UnsupportedOperationException(); }
+        @Override public <T> java.util.concurrent.Future<T> submit(Runnable task, T result) { throw new UnsupportedOperationException(); }
+        @Override public java.util.concurrent.Future<?> submit(Runnable task) { throw new UnsupportedOperationException(); }
+        @Override public <T> List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks) { throw new UnsupportedOperationException(); }
+        @Override public <T> List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks, long timeout, TimeUnit unit) { throw new UnsupportedOperationException(); }
+        @Override public <T> T invokeAny(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks) { throw new UnsupportedOperationException(); }
+        @Override public <T> T invokeAny(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks, long timeout, TimeUnit unit) { throw new UnsupportedOperationException(); }
     }
 }
